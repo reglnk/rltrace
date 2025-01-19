@@ -1,0 +1,139 @@
+import <std/io>
+import <std/system>
+import <std/string>
+import <std/vector>
+import <std/stack>
+
+(private) int delay = 10;
+(private) std::string swapname;
+
+
+namespace unix
+{
+	type mode_t = uint;
+	type File = libc::File;
+
+	extern (linkname: "poll")
+		int poll(void* fds, uint nfds, int timeout);
+	extern (linkname: "mkfifo")
+		int mkfifo(char* pathname, unix::mode_t mode);
+	extern (linkname: "fileno")
+		int fileno(char* filename);
+	// extern (linkname: "write")
+	// 	ulong write(int fd, void *buf, ulong count);
+	extern (linkname: "popen")
+		unix::File* popen(char* command, char* type);
+	extern (linkname: "pclose")
+		int pclose(unix::File* process);
+	extern (linkname: "remove")
+		int remove(char* filename);
+}
+
+bool check_prompt(std::stack<char> ln) {
+	ulong sz = ln.length;
+	return = (sz > 6 &&
+		ln.data[sz - 1] == ' ' &&
+		ln.data[sz - 2] == ')' &&
+		ln.data[sz - 3] == 'b' &&
+		ln.data[sz - 4] == 'd' &&
+		ln.data[sz - 5] == 'g' &&
+		ln.data[sz - 6] == '(');
+	// std::println("checked: ", return);
+}
+
+std::pair<int, int> findafter (
+	std::string source,
+	std::string what,
+	std::string stopmark,
+	int begin
+) {
+	return = std::pair<int, int>(-1, -1);
+	int b = source.indexOf(what, begin);
+	if (b == -1)
+		@return();
+	int e = b + what.length;
+	if (stopmark.length != 0) {
+		b = source.indexOf(stopmark, e);
+		if (b == -1)
+			@return();
+		return.first = e;
+		return.second = b;
+	}
+	else {
+		return.first = e;
+		return.second = e + what.length;
+	}
+}
+
+void main(int argc, char **argv)
+{
+	std::string cmd = std::sprint("gdb ");
+	for (int i = 1; i < argc; i++) {
+		cmd.appendC(argv[i]);
+		cmd.add(' ');
+	}
+
+	swapname = "/tmp/.rltrace.swp";
+	unix::remove(swapname.data);
+	// int mkf = unix::mkfifo(swapname.data, 1911);
+	int mkf = unix::mkfifo(swapname.data, 438); // RW for all
+	if (mkf != 0) {
+		std::println("failed to create FIFO");
+		@return();
+	}
+	std::println(std::sprint(cmd, " > ", swapname));
+	unix::File* mainproc = unix::popen(std::sprint(cmd, " > ", swapname).data, "w");
+	fdefer unix::pclose(mainproc);
+
+	std::file swap = std::file(swapname.c());
+    swap.open("r");
+    fdefer swap.close();
+
+    if (mainproc == null || swap.fd == null) {
+		std::println("failed to open process");
+		@return();
+	}
+
+	int mainprocFd = unix::fileno(mainproc);
+	if (mainprocFd == -1) {
+		std::println("failed to obtain file descriptor");
+		@return();
+	}
+	std::file mpfile = std::file("gdb_session");
+	mpfile.openFd("w", mainprocFd);
+
+	std::stack<char> buf = std::stack<char>();
+	int state = 0;
+	while (true) {
+		std::string line = "";
+		while (true) {
+			char sym;
+			if (swap.read(&sym, 1) == -1) {
+				std::println("error reading FIFO");
+				@return();
+			}
+			buf.push(sym);
+			if (!check_prompt(buf))
+				continue;
+
+			for (int i = 0; i != 6; i++)
+				buf.pop();
+			buf.push(0c);
+			line = std::string(buf.data);
+			buf.clear();
+			break;
+		}
+		if (line.length == 0)
+			continue;
+
+		std::println(line);
+		std::print("(rltrace) ");
+		std::string input = std::readLine();
+		if (input == "exit")
+			break;
+
+		mpfile.write(input.data, input.length);
+		mpfile.write("\n", 1);
+		mpfile.flush();
+	}
+}

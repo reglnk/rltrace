@@ -1,0 +1,146 @@
+require "io";
+require "os";
+local ffi = require "ffi";
+
+local cfg = {
+	delay = 10 // 10 msec for 'bt' call
+};
+
+[//[ operators ]//]
+
+local operator <* = table.insert;
+local operator fn *>(l, table r) table.insert(r, l);
+
+local operator fn <<*(table l, table r) {
+	for k, v in pairs(r) do
+		l[k] = v;
+}
+local operator fn *>>(table l, table r) {
+	for k, v in pairs(l) do
+		r[k] = v;
+}
+local operator fn <<*(table l, table r) {
+	for k, v in pairs(r) do
+		l[k] = v;
+}
+local operator fn <*>(table l, table r) {
+	local tab = {};
+	for k, v in pairs(l) do
+		tab[k] = v;
+	for k, v in pairs(r) do
+		tab[k] = v;
+	return tab;
+}
+
+// ==================
+
+ffi.cdef[[
+int poll(struct pollfd *fds, unsigned long nfds, int timeout);
+]];
+
+local C = ffi.C;
+local sleepms = fn(ms) C.poll(nil, 0, ms);
+
+local args = {"gdb", ...};
+
+for i = 1, #args do
+	if args[i]:find(" ") then
+		args[i] = '"' .. args[i]:gsub("\"", "\\\"") .. '"';
+
+local cmd = table.concat(args, " ");
+print("command line:", cmd);
+
+local swapname = "/tmp/.rltrace.swp";
+
+os.remove(swapname);
+os.execute("mkfifo " .. swapname);
+
+local mainproc = io.popen(cmd .. " > " .. swapname, "w");
+local swap = io.open(swapname, "r");
+
+if not (mainproc and swap) then
+	error("failed to open process");
+
+local fn<bool> check_prompt(table ln) #ln >= 6
+	and ln[#ln] == " " and
+	ln[#ln - 1] == ")" and
+	ln[#ln - 2] == "b" and
+	ln[#ln - 3] == "d" and
+	ln[#ln - 4] == "g" and
+	ln[#ln - 5] == "(";
+
+local fn<int?, int?> findafter (
+	string source,
+	string what,
+	string? stopmark,
+	int? begin
+) {
+	begin =~ or 1;
+	local b, e = source:find(what, begin);
+	if not b then return;
+	if (stopmark) {
+		b = source:find(stopmark, e + 1);
+		if not b then return;
+		return e + 1, b - 1
+	}
+	return e + 1
+}
+
+local state = 0;
+
+while true do {
+	local ln = {};
+	local line;
+	while true do {
+		table.insert(ln, swap:read(1));
+		if check_prompt(ln) then {
+			local len = #ln;
+			ln[len] = nil;
+			ln[len - 1] = nil;
+			ln[len - 2] = nil;
+			ln[len - 3] = nil;
+			ln[len - 4] = nil;
+			ln[len - 5] = nil;
+			assert(#ln == len - 6);
+			line = table.concat(ln);
+			ln = {};
+			break;
+		}
+	}
+	
+	local sigstr = nil;
+	while line do {
+		local b, e = findafter(line, "Program received signal ", "\n");
+		if not b then break;
+		sigstr = line:sub(b, e);
+		break;
+	}
+	if (sigstr) {
+		print(sigstr);
+		break;
+	}
+	
+	if line then print(line);
+	
+	local input;
+	if (state == 0) {
+		state = 1;
+		input = "r";
+	}
+	elseif (true) {
+		sleepms(cfg.delay);
+		input = "bt";
+	}
+	else {
+		io.write("(rltrace) ");
+		input = io.read("*line");
+		if (input == "exit")
+			break;
+	}
+	mainproc:write(input .. "\n");
+	mainproc:flush();
+}
+
+swap:close();
+mainproc:close();
+os.remove(swapname);
