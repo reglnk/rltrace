@@ -3,14 +3,16 @@ import <std/system>
 import <std/string>
 import <std/vector>
 import <std/stack>
+import <std/thread>
+import <std/vector>
 
 (private) int delay = 10;
 (private) std::string swapname;
 
-
 namespace unix
 {
 	type mode_t = uint;
+	type pid_t = uint;
 	type File = libc::File;
 
 	extern (linkname: "poll")
@@ -27,6 +29,12 @@ namespace unix
 		int pclose(unix::File* process);
 	extern (linkname: "remove")
 		int remove(char* filename);
+
+	extern (linkname: "kill")
+		int kill(unix::pid_t pid, int sig);
+
+	extern (linkname: "usleep")
+		int usleep(uint us);
 }
 
 bool check_prompt(std::stack<char> ln) {
@@ -65,9 +73,19 @@ std::pair<int, int> findafter (
 	}
 }
 
+int routine(void* input)
+{
+	long pid = (cast(long*)input)[0];
+	while (true) {
+		unix::usleep(100000);
+		std::println("slept for 100ms, PID: ", pid);
+		unix::kill(cast(uint)pid, 2); // SIGINT
+	}
+}
+
 void main(int argc, char **argv)
 {
-	std::string cmd = std::sprint("gdb ");
+	std::string cmd = "gdb --quiet --args ";
 	for (int i = 1; i < argc; i++) {
 		cmd.appendC(argv[i]);
 		cmd.add(' ');
@@ -81,7 +99,7 @@ void main(int argc, char **argv)
 		std::println("failed to create FIFO");
 		@return();
 	}
-	std::println(std::sprint(cmd, " > ", swapname));
+	std::println(cmd, " > ", swapname);
 	unix::File* mainproc = unix::popen(std::sprint(cmd, " > ", swapname).data, "w");
 	fdefer unix::pclose(mainproc);
 
@@ -102,8 +120,13 @@ void main(int argc, char **argv)
 	std::file mpfile = std::file("gdb_session");
 	mpfile.openFd("w", mainprocFd);
 
+	long PID = -1;
+
 	std::stack<char> buf = std::stack<char>();
 	int state = 0;
+	std::thread t1 = std::thread();
+	fdefer t1.join();
+
 	while (true) {
 		std::string line = "";
 		while (true) {
@@ -118,6 +141,7 @@ void main(int argc, char **argv)
 
 			for (int i = 0; i != 6; i++)
 				buf.pop();
+
 			buf.push(0c);
 			line = std::string(buf.data);
 			buf.clear();
@@ -126,12 +150,65 @@ void main(int argc, char **argv)
 		if (line.length == 0)
 			continue;
 
-		std::println(line);
-		std::print("(rltrace) ");
-		std::string input = std::readLine();
-		if (input == "exit")
-			break;
-
+		std::string input;
+		if (state == 0) {
+			std::println(line);
+			std::print("(rltrace) ");
+			input = std::readLine();
+			if (input == "exit")
+				break;
+			if (input == "rltrace") {
+				input = "b main\nr\ninfo inferior\n";
+				state = 1;
+			}
+		}
+		else if (state == 1) {
+			std::println("STATE 1");
+			// std::println(line);
+			state = 2;
+			input = "c\n";
+		}
+		else if (state == 2) {
+			std::println("STATE 2");
+			// std::println(line);
+			state = 3;
+			input = "c\n";
+		}
+		else if (state == 3) {
+			std::println("STATE 3");
+			// std::println(line);
+			std::vector<std::string> spl = line.split('\n');
+			for (int i = 0; i != spl.length; i += 1)
+			{
+				if (spl[i].at(0) == '*')
+				{
+					std::string spli = spl[i];
+					int beg = spli.indexOf("process ");
+					if (beg != -1)
+					{
+						std::string raw = spli.substring(beg + 8, spli.length);
+						// find where the number ends
+						int numlen = 0;
+						while (raw.at(numlen) >= '0' && raw.at(numlen) <= '9') {
+							numlen += 1;
+						}
+						raw.set(numlen, '\0');
+						raw.length = numlen;
+						PID = std::cstring::stoul(raw.data, raw.length);
+						break;
+					}
+				}
+			}
+			std::println("PID: ", PID);
+			t1.run(routine, cast(void*)(&PID));
+			state = 4;
+			input = "c";
+		}
+		else {
+			std::println("STATE 4");
+			std::println(line);
+			input = "bt\nc\n";
+		}
 		mpfile.write(input.data, input.length);
 		mpfile.write("\n", 1);
 		mpfile.flush();
